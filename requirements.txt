@@ -1,6 +1,6 @@
 # requirements.txt
 # For Streamlit App - Updated: May 22, 2025
-# Attempting more conservative versions for stability.
+# (Assuming direct image generation via google-generativeai SDK)
 
 # --- Core Application ---
 streamlit==1.45.0
