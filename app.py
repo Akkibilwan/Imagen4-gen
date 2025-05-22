@@ -1,396 +1,330 @@
-# app.py
-# Updated: May 22, 2025
-# Uses ONLY Gemini API (google-generativeai) for image analysis and 
-# (hypothetically) for image generation. Credentials from Streamlit Secrets.
-
 import streamlit as st
-from PIL import Image
+import os
 import io
 import json
+import base64
+import requests
+from PIL import Image
+import openai
 import google.generativeai as genai
-from google.oauth2 import service_account # For parsing service account from secrets
 
-# --- Configuration & Page Setup ---
+# --- Configuration & Credentials ---
 st.set_page_config(
-    page_title="Multi-Image Analyzer & Gemini Generator",
-    page_icon="✨",
+    page_title="Multi-Thumbnail Analyzer & Prompt Generator",
+    page_icon="🖼️",
     layout="wide"
 )
 
+# Custom CSS (Dark Mode - similar to YouTube)
 st.markdown("""
 <style>
-    .main { background-color: #121212; color: #e0e0e0; }
-    .stApp { background-color: #121212; }
-    h1, h2, h3 { color: #ffffff; font-family: 'Roboto', sans-serif; }
-    p, li, div[data-baseweb="base-input"], div[data-baseweb="textarea"], .stFileUploader label { color: #cccccc !important; }
-    .stButton>button { background-color: #007bff; color: white; border-radius: 8px; border: none; padding: 10px 15px; }
-    .stButton>button:hover { background-color: #0056b3; color: white; }
-    .stMultiSelect div[data-baseweb="select"] > div { background-color: #333333; color: #e0e0e0; }
-    .stImage > img { border: 2px solid #444444; border-radius: 8px; }
-    div[data-testid="stSpinner"] > div { color: #007bff !important; }
+    .main { background-color: #0f0f0f; color: #f1f1f1; }
+    .stApp { background-color: #0f0f0f; }
+    h1, h2, h3, h4, h5, h6 { color: #f1f1f1; font-family: 'Roboto', sans-serif; }
+    p, li, div, label { color: #aaaaaa; }
+    .stButton>button {
+        background-color: #303030;
+        color: #f1f1f1;
+        border: 1px solid #505050;
+    }
+    .stButton>button:hover {
+        background-color: #505050;
+        border: 1px solid #707070;
+    }
+    .stFileUploader label, .stTextInput label, .stTextArea label {
+        color: #f1f1f1 !important;
+    }
+    .uploaded-image-container {
+        border: 1px solid #303030;
+        border-radius: 8px;
+        padding: 15px;
+        margin-bottom: 20px;
+        background-color: #181818;
+    }
+    .prompt-section {
+        background-color: #202020;
+        padding: 10px;
+        border-radius: 5px;
+        margin-bottom: 10px;
+    }
+    .prompt-section h4 {
+        margin-top: 0;
+        color: #ffffff;
+    }
 </style>
 """, unsafe_allow_html=True)
 
-# --- Helper: Credentials & Client Initialization ---
-def initialize_gemini_client(creds_json_content_str):
-    """Initializes the Google Gemini AI client using credentials from secrets."""
-    try:
-        # Parse the JSON string from secrets into a dictionary
-        credentials_info = json.loads(creds_json_content_str)
-        # Create credentials object
-        credentials = service_account.Credentials.from_service_account_info(credentials_info)
-        
-        # Configure the genai library with these credentials
-        genai.configure(credentials=credentials)
-        
-        # Model for image analysis and text-based tasks
-        # Using a known multimodal model from the Gemini family
-        analysis_model = genai.GenerativeModel('gemini-1.5-flash-latest') # Or 'gemini-pro-vision' if preferred
-        
-        # --- HYPOTHETICAL: Model for Image Generation via Gemini API ---
-        # This assumes a specific model name and capability exists in the SDK for direct image generation.
-        # 'gemini-experimental-imagegen' is a PURELY HYPOTHETICAL model name.
-        # You would need to replace this with the actual model name if Google releases such a feature.
-        image_generation_model_name = 'gemini-experimental-imagegen' # Placeholder
+def setup_clients():
+    """Sets up and returns OpenAI and Gemini clients."""
+    openai_client_instance = None
+    gemini_model_instance = None
+
+    # OpenAI API
+    openai_api_key = st.secrets.get("OPENAI_API_KEY")
+    if not openai_api_key and "OPENAI_API_KEY" not in os.environ:
+        openai_api_key = st.sidebar.text_input("Enter your OpenAI API key:", type="password", key="openai_key_input")
+    elif "OPENAI_API_KEY" in os.environ:
+        openai_api_key = os.environ.get("OPENAI_API_KEY")
+
+    if openai_api_key:
         try:
-            image_generation_model = genai.GenerativeModel(image_generation_model_name)
-            st.session_state.gemini_image_gen_model = image_generation_model
-            st.info(f"Note: Attempting to use hypothetical Gemini model '{image_generation_model_name}' for image generation.")
-        except Exception as img_model_e:
-            st.warning(f"Could not initialize hypothetical Gemini image generation model ('{image_generation_model_name}'): {img_model_e}")
-            st.warning("Direct image generation may fail or not be supported by your SDK version/model.")
-            st.session_state.gemini_image_gen_model = None
-        # --- END HYPOTHETICAL ---
+            openai.api_key = openai_api_key
+            # Check if using new OpenAI client structure or old
+            if hasattr(openai, 'OpenAI'):
+                openai_client_instance = openai.OpenAI(api_key=openai_api_key)
+            else: # Fallback for older openai library version
+                openai_client_instance = openai
+        except Exception as e:
+            st.sidebar.error(f"OpenAI Initialization Error: {e}")
+    else:
+        st.sidebar.warning("OpenAI API Key not found. Image analysis will be unavailable.")
 
-        st.session_state.clients_initialized = True
-        st.session_state.gemini_analysis_model = analysis_model
-        st.success("Google Gemini Client Initialized Successfully!")
-        return True
-    except json.JSONDecodeError:
-        st.error("Error: The GOOGLE_CREDENTIALS_JSON_STR secret is not valid JSON.")
-        st.session_state.clients_initialized = False
-        return False
+    # Gemini API
+    gemini_api_key = st.secrets.get("GOOGLE_API_KEY")
+    if not gemini_api_key and "GOOGLE_API_KEY" not in os.environ:
+        gemini_api_key = st.sidebar.text_input("Enter your Google Gemini API key:", type="password", key="gemini_key_input")
+    elif "GOOGLE_API_KEY" in os.environ:
+        gemini_api_key = os.environ.get("GOOGLE_API_KEY")
+
+    if gemini_api_key:
+        try:
+            genai.configure(api_key=gemini_api_key)
+            gemini_model_instance = genai.GenerativeModel('gemini-1.5-flash-latest') # Or 'gemini-pro'
+        except Exception as e:
+            st.sidebar.error(f"Gemini Initialization Error: {e}")
+    else:
+        st.sidebar.warning("Google Gemini API Key not found. Prompt breakdown will be unavailable.")
+
+    return openai_client_instance, gemini_model_instance
+
+# --- Image Processing Functions ---
+def encode_image_to_base64(image_bytes):
+    """Encodes image bytes to base64 string."""
+    return base64.b64encode(image_bytes).decode('utf-8')
+
+# --- AI Analysis Functions ---
+def analyze_image_with_openai(client, image_base64, filename="image"):
+    """
+    Analyzes an image using OpenAI's GPT-4 Vision model.
+    Returns a textual description of the image.
+    """
+    if not client:
+        return "OpenAI client not initialized."
+    try:
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": f"Analyze this YouTube thumbnail image named '{filename}' in detail. Describe its main subject, background, style, colors, any text present, and overall composition and mood. Focus on elements that would be important for recreating it."},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}}
+                ]
+            }
+        ]
+        if hasattr(client, 'chat') and hasattr(client.chat, 'completions'): # New OpenAI client
+            response = client.chat.completions.create(
+                model="gpt-4o", # Or gpt-4-vision-preview
+                messages=messages,
+                max_tokens=600
+            )
+            return response.choices[0].message.content
+        else: # Old OpenAI client
+             response = client.ChatCompletion.create(
+                model="gpt-4o",
+                messages=messages,
+                max_tokens=600
+            )
+             return response['choices'][0]['message']['content']
     except Exception as e:
-        st.error(f"Error initializing Google Gemini Client: {e}")
-        st.session_state.clients_initialized = False
-        return False
+        st.error(f"Error analyzing image '{filename}' with OpenAI: {e}")
+        return f"Unable to analyze '{filename}' with OpenAI."
 
-# --- Core Functions ---
-BREAKDOWN_CATEGORIES_PROMPT_SYSTEM = """
-You are an expert image analyst. Your task is to analyze the provided image and break it down into distinct visual and conceptual components.
-For each component category I list, provide:
-1. 'analysis': A detailed description of that component in the image. Be specific about colors, shapes, textures, and any text content including its appearance (font, color, size if discernible).
-2. 'prompt_suggestion': A concise, highly descriptive phrase (5-15 words) that could be used as part of a larger prompt to an image generation model to recreate *only that specific component* accurately. For example, if there's red text saying 'SALE!', the prompt suggestion might be 'Bold red "SALE!" text, sans-serif font, slight shadow'.
+def generate_breakdown_prompts_with_gemini(model, openai_analysis, filename="image"):
+    """
+    Takes OpenAI's analysis and uses Gemini to generate specific breakdown prompts.
+    Returns a dictionary of prompts.
+    """
+    if not model:
+        return {"error": "Gemini model not initialized."}
 
-The categories for breakdown are:
-- Main Subject: The primary focus (person, object, character). Include details like pose, expression, clothing.
-- Action/Activity: What the main subject is doing or implying.
-- Setting/Background: The environment or backdrop. Describe colors, textures, and key elements.
-- Key Objects (excluding main subject): Other notable items, their appearance, and placement.
-- Dominant Colors/Palette: List the main colors and describe the overall color scheme (e.g., vibrant, muted, monochrome with blue accents).
-- Artistic Style: e.g., photorealistic, watercolor illustration, 3D cartoon render, flat graphic design, pixel art.
-- Text Elements: For each piece of text, describe: content, font style (e.g., serif, sans-serif, script), color, approximate size relative to image, and any effects (e.g., outline, shadow, glow).
-- Overall Vibe/Emotion: The feeling the image conveys (e.g., exciting and energetic, calm and serene, mysterious and intriguing).
-- Compositional Focus: How elements are arranged, main focal point, rule of thirds, leading lines, etc.
+    prompt_system = """
+You are an expert prompt engineer. Based on the provided image analysis,
+generate distinct, descriptive text prompts for an AI image generator (like DALL-E, Midjourney, or Stable Diffusion)
+that would help recreate specific aspects of the original image.
 
-Return your response ONLY as a valid JSON object where keys are the category names (e.g., "Main Subject")
-and values are objects containing 'analysis' and 'prompt_suggestion'.
-If a category is not applicable (e.g., no text), provide 'analysis': "Not applicable" and an empty string for 'prompt_suggestion'.
+For each category listed below, provide a concise and actionable prompt.
+If a category is not relevant or information is insufficient from the analysis, state "Not clearly applicable" or provide a best-guess prompt.
+Output the result as a JSON object with the following keys:
+"overall_scene_composition", "main_subject_details", "background_elements",
+"color_palette_mood", "lighting_style", "artistic_style_medium", "text_elements_style".
+Each value should be a string containing the generated prompt for that category.
+
+Example for a single category if the analysis was "A cat wearing a hat":
+"main_subject_details": "Photorealistic close-up of a fluffy ginger cat wearing a tiny blue party hat, looking curious."
 """
 
-def analyze_image_and_create_prompts(image_bytes):
-    """Analyzes image with Gemini, breaks it down, and generates prompt suggestions for each component."""
-    if 'gemini_analysis_model' not in st.session_state or not st.session_state.clients_initialized:
-        st.error("Gemini analysis client not initialized.")
-        return None
-    
-    model = st.session_state.gemini_analysis_model
-    # Gemini SDK expects image parts in a specific format for multimodal input
-    image_part = {"mime_type": "image/png", "data": image_bytes} # Assuming PNG, adjust if needed
-    
-    response = None  # Initialize for safe access in except block
-    
+    user_prompt = f"""
+Image Analysis for '{filename}':
+---
+{openai_analysis}
+---
+
+Generate the breakdown prompts in the specified JSON format.
+"""
     try:
-        # Construct the prompt for the Gemini model
-        full_prompt_parts = [BREAKDOWN_CATEGORIES_PROMPT_SYSTEM, image_part]
+        full_prompt = [
+            {"role": "user", "parts": [prompt_system]},
+            {"role": "model", "parts": ["Okay, I understand. I will take the image analysis and generate a JSON object with specific prompts for each category."]}, # Few-shot priming
+            {"role": "user", "parts": [user_prompt]}
+        ]
+        response = model.generate_content(full_prompt)
         
-        response = model.generate_content(full_prompt_parts)
-        
-        if not response or not hasattr(response, 'text'):
-            st.error("Gemini analysis call succeeded but returned an unexpected response structure.")
-            try: st.error(f"Problematic Gemini response object: {response}")
-            except Exception: pass
-            return None
-
-        cleaned_response_text = response.text.strip()
-        if not cleaned_response_text:
-            st.error("Gemini analysis returned an empty text response.")
-            return None
-
-        # Gemini can sometimes wrap JSON in ```json ... ```
-        if cleaned_response_text.startswith("```json"):
-            cleaned_response_text = cleaned_response_text[7:]
-        if cleaned_response_text.endswith("```"):
-            cleaned_response_text = cleaned_response_text[:-3]
-        
-        analysis_result = json.loads(cleaned_response_text.strip())
-        return analysis_result
-        
-    except json.JSONDecodeError as e:
-        st.error(f"Error parsing Gemini's JSON response: {e}. Ensure the model is providing valid JSON.")
-        st.error(f"Gemini raw response (if available): {getattr(response, 'text', 'Response object not available or lacks text attribute')}")
-        return None
-    except Exception as e:
-        st.error(f"An unexpected error occurred during Gemini analysis: {e}")
-        st.error(f"Gemini raw response (if available) at time of error: {getattr(response, 'text', 'Response object not available or lacks text attribute')}")
-        return None
-
-# --- HYPOTHETICAL: Image Generation with Gemini API ---
-def generate_image_with_gemini(prompt_text):
-    """
-    Generates an image using the Gemini API (HYPOTHETICAL direct image generation).
-    This function assumes that the 'google-generativeai' SDK and a specific
-    Gemini model support direct image generation. This is a placeholder.
-    """
-    if 'gemini_image_gen_model' not in st.session_state or not st.session_state.gemini_image_gen_model:
-        st.error("Gemini image generation model not initialized or available. Cannot generate image.")
-        st.error("This feature relies on direct image generation capabilities in the Gemini API, which may require specific SDK versions or model names if available.")
-        return None
-
-    model_instance = st.session_state.gemini_image_gen_model
-    st.info(f"Attempting image generation with Gemini using prompt: '{prompt_text[:150]}...'")
-    
-    try:
-        # --- This is a PURELY HYPOTHETICAL API call structure ---
-        # The actual method name, parameters, and response structure would depend on
-        # Google's official implementation if this feature exists.
-        # You would need to replace this with the correct API call.
-        
-        # Example of what such a call *might* look like if the model directly outputs image bytes
-        # or a structure containing them.
-        # This is highly speculative.
-        
-        # response = model_instance.generate_content(
-        #     f"Generate an image based on this detailed prompt: {prompt_text}",
-        #     generation_config=genai.types.GenerationConfig(
-        #         candidate_count=1
-        #         # Hypothetical parameter to request image output, e.g., response_mime_type="image/png"
-        #     )
-        # )
-        #
-        # if response.parts and response.parts[0].inline_data and response.parts[0].inline_data.mime_type.startswith("image/"):
-        #    return response.parts[0].inline_data.data # bytes
-
-        st.error("CRITICAL: The 'generate_image_with_gemini' function is a placeholder.")
-        st.error("Direct image generation with 'google-generativeai' SDK requires an official API and model.")
-        st.error("Please consult the latest Google documentation for 'google-generativeai' for image generation capabilities and update this function accordingly.")
-        # To prevent actual errors from this hypothetical function during testing of other parts:
-        return None 
-        
-    except AttributeError as ae:
-        st.error(f"SDK Error (Hypothetical Call): The method for image generation might be incorrect or not available: {ae}")
-        st.error("This indicates the assumed API for direct Gemini image generation does not exist as implemented.")
-        return None
-    except Exception as e:
-        st.error(f"Error during hypothetical Gemini image generation: {e}")
-        return None
-    # --- END HYPOTHETICAL ---
-
-# --- Streamlit App UI & Logic ---
-st.title("🖼️ Image Analyzer & Creative Prompt Generator (Gemini API)")
-st.markdown("Upload images for detailed AI breakdown. Select components to build a new prompt, then (theoretically) generate a new image using Gemini.")
-st.markdown("**Disclaimer:** Direct image *generation* with the `google-generativeai` SDK is a feature assumed for this example. If not officially supported by Google with the model and SDK version you are using, image generation will fail or not work as expected.")
-
-# Session State Initializations
-if 'clients_initialized' not in st.session_state: st.session_state.clients_initialized = False
-if 'uploaded_image_analyses' not in st.session_state: st.session_state.uploaded_image_analyses = [] 
-if 'all_selectable_prompts' not in st.session_state: st.session_state.all_selectable_prompts = [] 
-if 'current_selected_labels' not in st.session_state: st.session_state.current_selected_labels = []
-if 'final_combined_prompt' not in st.session_state: st.session_state.final_combined_prompt = ""
-if 'generated_image_bytes' not in st.session_state: st.session_state.generated_image_bytes = None
-
-# Sidebar for Credentials from Streamlit Secrets
-with st.sidebar:
-    st.header("🔑 Google Gemini API Setup")
-    st.info("This app expects Google Cloud credentials to be set in Streamlit Secrets as `GOOGLE_CREDENTIALS_JSON_STR`.")
-
-    # GCP Project ID might still be useful for context or if certain Gemini features are project-scoped
-    gcp_project_id_secret = st.secrets.get("GCP_PROJECT_ID")
-    if gcp_project_id_secret:
-        st.caption(f"Using Project ID: {gcp_project_id_secret} (from secrets)")
-    else:
-        st.caption("GCP_PROJECT_ID not found in secrets (optional for some Gemini API uses).")
-
-    creds_json_str = st.secrets.get("GOOGLE_CREDENTIALS_JSON_STR")
-
-    if st.button("Initialize Gemini Client", disabled=st.session_state.clients_initialized):
-        if creds_json_str:
-            with st.spinner("Initializing Gemini client..."):
-                initialize_gemini_client(creds_json_str)
+        # Clean the response to extract JSON part
+        text_response = response.text.strip()
+        # Find the start and end of the JSON block
+        json_start = text_response.find('{')
+        json_end = text_response.rfind('}') + 1
+        if json_start != -1 and json_end != -1:
+            json_str = text_response[json_start:json_end]
+            return json.loads(json_str)
         else:
-            st.error("`GOOGLE_CREDENTIALS_JSON_STR` not found in Streamlit Secrets. Please configure it.")
-            st.markdown("See [Streamlit Secrets Management](https://docs.streamlit.io/develop/concepts/connections/secrets-management) for help.")
+            st.warning(f"Could not parse JSON from Gemini response for {filename}. Response was: {text_response}")
+            return {"error": f"Could not parse JSON from Gemini for {filename}."}
+
+    except json.JSONDecodeError as e:
+        st.error(f"JSON decoding error for '{filename}' from Gemini: {e}. Response text: {response.text}")
+        return {"error": f"JSON decoding error for {filename}."}
+    except Exception as e:
+        st.error(f"Error generating prompts for '{filename}' with Gemini: {e}")
+        return {"error": f"Unable to generate prompts for '{filename}' with Gemini."}
+
+# --- Main Application ---
+def main():
+    st.title("🖼️ Multi-Thumbnail Analyzer & Prompt Generator")
+    st.markdown("Upload one or more thumbnail images. The app will use OpenAI to analyze them, and then Gemini to generate breakdown prompts for recreating similar visuals.")
+
+    openai_client, gemini_model = setup_clients()
+
+    # Initialize session state
+    if 'image_analyses' not in st.session_state:
+        st.session_state.image_analyses = [] # List of dicts: {filename, bytes, b64, openai_desc, gemini_prompts}
+
+    uploaded_files = st.file_uploader(
+        "Upload thumbnail images (JPG, PNG)",
+        type=["jpg", "png", "jpeg"],
+        accept_multiple_files=True,
+        key="file_uploader"
+    )
+
+    if uploaded_files:
+        new_files_to_process = []
+        for uploaded_file in uploaded_files:
+            # Check if this file (by name and size) has already been processed to avoid duplicates on re-upload
+            is_new = True
+            for existing_analysis in st.session_state.image_analyses:
+                if existing_analysis['filename'] == uploaded_file.name and len(existing_analysis['bytes']) == uploaded_file.size:
+                    is_new = False
+                    break
+            if is_new:
+                new_files_to_process.append(uploaded_file)
+
+        if new_files_to_process:
+            st.info(f"Found {len(new_files_to_process)} new images to add to the processing queue.")
+
+        if st.button(f"Process {len(new_files_to_process) if new_files_to_process else len(st.session_state.image_analyses)} Image(s)", key="analyze_button", disabled=not (openai_client and gemini_model)):
+            if not openai_client:
+                st.error("OpenAI client is not initialized. Please check your API key.")
+            if not gemini_model:
+                st.error("Gemini model is not initialized. Please check your API key.")
             
-    if st.session_state.clients_initialized:
-        st.success("✅ Gemini Client Ready!")
-    else:
-        st.info("ⓘ Please initialize the client using your configured secrets.")
-
-# Main App Flow
-if not st.session_state.clients_initialized:
-    st.warning("🚦 Please initialize the Gemini Client using the sidebar.")
-    st.stop()
-
-# 1. Multi-Image Upload
-st.header("1. Upload Images for Analysis")
-uploaded_files = st.file_uploader(
-    "Choose images (PNG, JPG, JPEG)",
-    type=["png", "jpg", "jpeg"],
-    accept_multiple_files=True,
-    key="thumbnail_uploader"
-)
-
-if uploaded_files:
-    new_files_to_process = []
-    # Use a more robust way to track processed files if file_id is not persistent
-    processed_file_ids = {item['id'] for item in st.session_state.uploaded_image_analyses}
-
-    for uploaded_file in uploaded_files:
-        # Create a unique identifier for the file based on name and size
-        file_identifier = f"{uploaded_file.name}_{uploaded_file.size}"
-        if file_identifier not in processed_file_ids:
-            new_files_to_process.append(uploaded_file)
-
-    if new_files_to_process:
-        if st.button(f"Analyze {len(new_files_to_process)} New Image(s) with Gemini ✨", key="analyze_button"):
-            with st.spinner("Analyzing images with Gemini... this may take a few moments per image."):
-                # Iterate over a copy if modifying the list, or build a new list
-                current_analyses = list(st.session_state.uploaded_image_analyses)
-                for uploaded_file in new_files_to_process:
-                    file_identifier = f"{uploaded_file.name}_{uploaded_file.size}"
-                    st.write(f"Processing: {uploaded_file.name}")
-                    try:
-                        img = Image.open(uploaded_file)
-                        # Convert to PNG bytes for consistency
-                        img_byte_arr = io.BytesIO()
-                        img.save(img_byte_arr, format='PNG')
-                        image_bytes = img_byte_arr.getvalue()
-
-                        analysis_data = analyze_image_and_create_prompts(image_bytes)
-                        
-                        if analysis_data:
-                            current_analyses.append({
-                                "id": file_identifier, # Use the unique identifier
-                                "name": uploaded_file.name,
-                                "image_obj": img, 
-                                "analysis_data": analysis_data
-                            })
-                            st.success(f"Analyzed: {uploaded_file.name}")
-                        else:
-                            st.error(f"Failed to get analysis data for: {uploaded_file.name}")
-                    except Exception as e:
-                        st.error(f"Error processing file {uploaded_file.name}: {e}")
+            if openai_client and gemini_model:
+                current_analyses = [] # Store analyses for this run
                 
-                st.session_state.uploaded_image_analyses = current_analyses
-                # Rebuild selectable prompts from all analyses
-                st.session_state.all_selectable_prompts = []
-                for analysis_item in st.session_state.uploaded_image_analyses:
-                    if analysis_item.get('analysis_data'):
-                        for category, data in analysis_item['analysis_data'].items():
-                            prompt_text = data.get('prompt_suggestion')
-                            # Ensure prompt_text is valid and not just whitespace
-                            if prompt_text and isinstance(prompt_text, str) and prompt_text.strip():
-                                # Create a unique ID for each prompt suggestion for the multiselect key
-                                unique_prompt_id = f"{analysis_item['id']}_{category.replace(' ', '_')}"
-                                display_label = f"({analysis_item['name']}) {category}: {prompt_text}"
-                                st.session_state.all_selectable_prompts.append(
-                                    (unique_prompt_id, display_label, prompt_text, analysis_item['name'])
-                                )
-            st.rerun() # Rerun to update UI with new analyses and selectable prompts
+                # If new files were just uploaded, prioritize them
+                files_for_processing_run = new_files_to_process if new_files_to_process else \
+                                        [f for f in uploaded_files if not any(a['filename'] == f.name for a in st.session_state.image_analyses)]
 
-# Display Analyzed Images & Breakdowns
-if st.session_state.uploaded_image_analyses:
-    st.header("📊 Analyzed Images & Prompt Ideas (from Gemini)")
-    for item in st.session_state.uploaded_image_analyses:
-        with st.expander(f"View Analysis for: {item['name']}", expanded=False):
-            cols = st.columns([1, 2])
-            with cols[0]:
-                st.image(item['image_obj'], caption=item['name'], use_column_width="auto")
-            with cols[1]:
-                st.subheader(f"Breakdown for: {item['name']}")
-                if item.get('analysis_data'):
-                    for category, data in item['analysis_data'].items():
-                        st.markdown(f"**{category}**:")
-                        st.markdown(f"&nbsp;&nbsp;&nbsp;*Analysis*: {data.get('analysis', 'N/A')}")
-                        prompt_sugg = data.get('prompt_suggestion')
-                        if prompt_sugg and prompt_sugg.strip(): # Check if prompt suggestion is not empty
-                             st.markdown(f"&nbsp;&nbsp;&nbsp;*Prompt Idea*: `{prompt_sugg}`")
-                else:
-                    st.write("No analysis data available for this image.")
-        st.divider()
 
-# 3. User Selection of Prompts & Image Generation
-if st.session_state.all_selectable_prompts:
-    st.header("📝 Select Prompt Components & Generate New Image")
-    
-    # Options for multiselect are the display_labels
-    options = [item[1] for item in st.session_state.all_selectable_prompts]
-    
-    # Use st.session_state to preserve multiselect state across reruns
-    st.session_state.current_selected_labels = st.multiselect(
-        "Choose prompt segments from the analyses above:",
-        options=options,
-        default=st.session_state.current_selected_labels, 
-        key=f"prompt_multiselect_{len(st.session_state.all_selectable_prompts)}" # Dynamic key if options change
-    )
-    
-    selected_prompt_texts_for_generation = []
-    for label in st.session_state.current_selected_labels:
-        for item in st.session_state.all_selectable_prompts:
-            if item[1] == label: # Match based on display_label
-                selected_prompt_texts_for_generation.append(item[2]) # Add the actual prompt_text
-                break
-    
-    if selected_prompt_texts_for_generation:
-        st.subheader("Selected Prompt Segments:")
-        for seg_idx, segment in enumerate(selected_prompt_texts_for_generation):
-            st.markdown(f"- `{segment}`")
+                with st.spinner("Analyzing images... This may take a while for multiple images."):
+                    for uploaded_file in files_for_processing_run:
+                        image_bytes = uploaded_file.getvalue()
+                        image_base64 = encode_image_to_base64(image_bytes)
+                        filename = uploaded_file.name
+                        st.write(f"Processing: {filename}")
 
-        # Combine selected segments into a single prompt string
-        current_prompt_text = ", ".join(selected_prompt_texts_for_generation)
-        # Allow user to edit the final combined prompt
-        st.session_state.final_combined_prompt = st.text_area(
-            "Combined Prompt for Image Generation (edit if needed):", 
-            value=current_prompt_text, 
-            height=150, 
-            key="final_prompt_edit_area" # Ensure key is consistent
-        )
+                        # 1. Analyze with OpenAI
+                        openai_desc = analyze_image_with_openai(openai_client, image_base64, filename)
+                        if "Unable to analyze" in openai_desc or "OpenAI client not initialized" in openai_desc :
+                             st.warning(f"Skipping Gemini for {filename} due to OpenAI analysis issue.")
+                             gemini_prompts = {"error": "Skipped due to OpenAI analysis failure."}
+                        else:
+                            # 2. Generate breakdown prompts with Gemini
+                            gemini_prompts = generate_breakdown_prompts_with_gemini(gemini_model, openai_desc, filename)
 
-        if st.button("🚀 Generate Image with Gemini (Experimental)", type="primary", key="generate_gemini_image_button"):
-            if not st.session_state.final_combined_prompt.strip():
-                st.error("The combined prompt is empty. Please select or write a prompt.")
-            else:
-                with st.spinner("Attempting direct Gemini image generation... (Experimental Feature)"):
-                    generated_bytes = generate_image_with_gemini(st.session_state.final_combined_prompt) 
-                    if generated_bytes:
-                        st.session_state.generated_image_bytes = generated_bytes
-                        st.success("Image data (hypothetically) received from Gemini!")
+                        current_analyses.append({
+                            "filename": filename,
+                            "bytes": image_bytes,
+                            "b64": image_base64, # Storing b64 can consume memory, consider if needed long term
+                            "openai_desc": openai_desc,
+                            "gemini_prompts": gemini_prompts
+                        })
+                
+                # Add new results to session state, avoiding duplicates if any slipped through
+                for new_analysis in current_analyses:
+                    if not any(existing['filename'] == new_analysis['filename'] for existing in st.session_state.image_analyses):
+                        st.session_state.image_analyses.append(new_analysis)
+                
+                st.success("Analysis complete!")
+                # Clear the uploader after processing to avoid reprocessing the same files by default
+                # This can be tricky if the user wants to re-analyze after changing API keys, for example
+                # For now, let's clear it. User can re-upload if needed.
+                # st.experimental_rerun() # This might be too aggressive, let's see
+
+
+    if st.session_state.image_analyses:
+        st.markdown("---")
+        st.subheader("Analysis Results & Breakdown Prompts")
+
+        if st.button("Clear All Results", key="clear_results"):
+            st.session_state.image_analyses = []
+            st.rerun()
+
+
+        for i, analysis_data in enumerate(st.session_state.image_analyses):
+            with st.container():
+                st.markdown(f"<div class='uploaded-image-container'>", unsafe_allow_html=True)
+                st.subheader(f"🖼️ {analysis_data['filename']}")
+
+                col1, col2 = st.columns([1, 2])
+                with col1:
+                    st.image(analysis_data['bytes'], use_column_width=True, caption="Uploaded Image")
+
+                with col2:
+                    st.markdown("#### 📝 OpenAI Vision Analysis:")
+                    with st.expander("Show/Hide OpenAI Analysis", expanded=False):
+                        st.markdown(f"<small>{analysis_data['openai_desc']}</small>", unsafe_allow_html=True)
+
+                    st.markdown("#### ✨ Gemini Breakdown Prompts (for GPT/DALL-E etc.):")
+                    if "error" in analysis_data["gemini_prompts"]:
+                        st.error(f"Could not generate prompts: {analysis_data['gemini_prompts']['error']}")
+                    elif isinstance(analysis_data["gemini_prompts"], dict):
+                        for category, prompt_text in analysis_data["gemini_prompts"].items():
+                            clean_category_name = category.replace("_", " ").title()
+                            st.markdown(f"<div class='prompt-section'><h4>{clean_category_name}</h4>", unsafe_allow_html=True)
+                            st.code(prompt_text, language=None) # `None` for plain text, allows easy copy
+                            st.markdown("</div>", unsafe_allow_html=True)
                     else:
-                        st.session_state.generated_image_bytes = None # Clear previous if failed
-                        st.error("Gemini image generation did not return image data or failed. This is an experimental/placeholder feature.")
-                st.rerun() # Rerun to display the image or error
+                        st.warning("Gemini prompts are not in the expected format.")
+                st.markdown("</div>", unsafe_allow_html=True)
+                st.markdown("---")
+    else:
+        st.info("Upload some images to get started.")
 
-# Display Generated Image
-if st.session_state.generated_image_bytes:
-    st.header("🎉 Your Generated Image (via Gemini Experimental) 🎉")
-    st.image(st.session_state.generated_image_bytes, caption="Generated by Gemini API (Experimental)", use_column_width="auto")
-    st.download_button(
-        label="Download Image",
-        data=st.session_state.generated_image_bytes,
-        file_name="gemini_generated_image.png",
-        mime="image/png",
-        key="download_gemini_button"
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### About")
+    st.sidebar.info(
+        "This app uses AI to analyze YouTube thumbnail images (or any image) "
+        "and generate detailed prompts for recreating similar visuals with text-to-image models."
     )
 
-st.markdown("---")
-st.caption("Built with Streamlit and Google Generative AI. Image generation with Gemini direct API is experimental and based on assumed capabilities.")
+if __name__ == "__main__":
+    main()
