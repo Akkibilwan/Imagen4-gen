@@ -1,12 +1,12 @@
-# requirements.txt
-# For Streamlit App - Updated: May 22, 2025
-# (Assuming direct image generation via google-generativeai SDK)
-
-# --- Core Application ---
+requirements.txt
+For Streamlit App - Updated: May 22, 2025
+Using ONLY Gemini API (google-generativeai) for analysis and (hypothetical) image generation.
+--- Core Application ---
 streamlit==1.45.0
 Pillow==11.2.1
 
-# --- Google Cloud AI & Auth (Focus on Gemini API) ---
-# Using a more conservative projected version for google-generativeai
-google-generativeai==0.8.0 
+--- Google Cloud AI & Auth (Focus on Gemini API) ---
+Assuming a version of google-generativeai that supports image analysis
+and (hypothetically) direct image generation.
+google-generativeai==0.8.0
 google-auth==2.29.0
