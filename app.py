@@ -1,17 +1,19 @@
 # app.py
-# Updated: May 22, 2025 - Includes fix for UnboundLocalError
+# Updated: May 22, 2025
+# Uses Gemini API for image analysis and Vertex AI (Imagen) for image generation.
 
 import streamlit as st
 from PIL import Image
 import io
 import json
 import google.generativeai as genai
+from google.cloud import aiplatform # Re-added for Vertex AI Imagen
 from google.oauth2 import service_account
 
 # --- Configuration & Page Setup ---
 st.set_page_config(
-    page_title="Multi-Image Thumbnail Analyzer & Gemini Generator",
-    page_icon="✨",
+    page_title="Multi-Image Thumbnail Analyzer & Generator",
+    page_icon="🎨",
     layout="wide"
 )
 
@@ -30,35 +32,32 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # --- Helper: Credentials & Client Initialization ---
-def initialize_gemini_client(creds_json_content):
-    """Initializes the Google Gemini AI client."""
+def initialize_clients(gcp_project_id, gcp_location, creds_json_content):
+    """Initializes Google AI clients (Gemini for analysis, Vertex AI for Imagen)."""
     try:
         credentials_info = json.loads(creds_json_content)
         credentials = service_account.Credentials.from_service_account_info(credentials_info)
+
+        # Initialize Gemini (google-generativeai) for analysis
         genai.configure(credentials=credentials)
+        gemini_analysis_model = genai.GenerativeModel('gemini-1.5-flash-latest')
         
-        analysis_model = genai.GenerativeModel('gemini-1.5-flash-latest')
-        
-        try:
-            # HYPOTHETICAL: Model for Image Generation via Gemini API
-            image_generation_model = genai.GenerativeModel('gemini-1.5-pro-imagegen') # PURELY HYPOTHETICAL model name
-            st.session_state.gemini_image_gen_model = image_generation_model
-            st.info("Note: Using a hypothetical Gemini model for image generation.")
-        except Exception as img_model_e:
-            st.warning(f"Could not initialize hypothetical Gemini image generation model: {img_model_e}.")
-            st.warning("Direct image generation feature might not be available or model name is incorrect.")
-            st.session_state.gemini_image_gen_model = None
+        # Initialize Vertex AI (google-cloud-aiplatform) for Imagen
+        aiplatform.init(project=gcp_project_id, location=gcp_location, credentials=credentials)
+        imagen_model_instance = aiplatform.ImageGenerationModel.from_pretrained("imagegeneration@006") # Using a common stable model ID
 
         st.session_state.clients_initialized = True
-        st.session_state.gemini_analysis_model = analysis_model
-        st.success("Google Gemini Client Initialized Successfully!")
+        st.session_state.gemini_analysis_model = gemini_analysis_model
+        st.session_state.imagen_model = imagen_model_instance # For Vertex AI Imagen
+        st.success("Google AI Clients (Gemini & Vertex AI Imagen) Initialized Successfully!")
         return True
     except json.JSONDecodeError:
         st.error("Error: The provided Google Credentials JSON is not valid.")
         st.session_state.clients_initialized = False
         return False
     except Exception as e:
-        st.error(f"Error initializing Google Gemini Client: {e}")
+        st.error(f"Error initializing Google AI Clients: {e}")
+        st.error("Please ensure your GCP Project ID, Location, and Service Account are correct and have necessary permissions (Vertex AI API, Generative Language API).")
         st.session_state.clients_initialized = False
         return False
 
@@ -93,8 +92,7 @@ def analyze_image_and_create_prompts(image_bytes):
     
     model = st.session_state.gemini_analysis_model
     image_part = {"mime_type": "image/png", "data": image_bytes}
-    
-    response = None  # Initialize response to None here (FIX for UnboundLocalError)
+    response = None # Initialize for safe access in except block
     
     try:
         full_prompt = [BREAKDOWN_CATEGORIES_PROMPT_SYSTEM, image_part]
@@ -102,14 +100,11 @@ def analyze_image_and_create_prompts(image_bytes):
         
         if not response or not hasattr(response, 'text'):
             st.error("Gemini analysis call succeeded but returned an unexpected response structure.")
-            try:
-                st.error(f"Problematic Gemini response object: {response}")
-            except Exception as log_e:
-                st.error(f"Could not even log the problematic response: {log_e}")
+            try: st.error(f"Problematic Gemini response object: {response}")
+            except Exception: pass # Avoid error during logging
             return None
 
         cleaned_response_text = response.text.strip()
-        
         if not cleaned_response_text:
             st.error("Gemini analysis returned an empty text response.")
             return None
@@ -123,7 +118,7 @@ def analyze_image_and_create_prompts(image_bytes):
         return analysis_result
         
     except json.JSONDecodeError as e:
-        st.error(f"Error parsing Gemini's JSON response: {e}. Ensure the model is providing valid JSON.")
+        st.error(f"Error parsing Gemini's JSON response: {e}.")
         st.error(f"Gemini raw response (if available): {getattr(response, 'text', 'Response object not available or lacks text attribute')}")
         return None
     except Exception as e:
@@ -131,44 +126,44 @@ def analyze_image_and_create_prompts(image_bytes):
         st.error(f"Gemini raw response (if available) at time of error: {getattr(response, 'text', 'Response object not available or lacks text attribute')}")
         return None
 
-# HYPOTHETICAL: Image Generation with Gemini API
-def generate_image_with_gemini(prompt_text):
-    """
-    Generates an image using the Gemini API (HYPOTHETICAL direct image generation).
-    """
-    if 'gemini_image_gen_model' not in st.session_state or not st.session_state.gemini_image_gen_model:
-        st.error("Gemini image generation model not initialized or available. Cannot generate image.")
-        st.error("This feature relies on direct image generation capabilities in the Gemini API, which may require specific SDK versions or model names if available.")
+def generate_image_with_imagen(prompt_text):
+    """Generates an image using Imagen on Vertex AI."""
+    if 'imagen_model' not in st.session_state or not st.session_state.clients_initialized:
+        st.error("Imagen client (Vertex AI) not initialized. Please check credentials and initialization status.")
         return None
 
-    model_instance = st.session_state.gemini_image_gen_model
-    st.info(f"Attempting image generation with Gemini using prompt: '{prompt_text[:150]}...'")
-    
+    model_instance = st.session_state.imagen_model
     try:
-        # This is a PURELY HYPOTHETICAL API call structure for image generation.
-        # The actual method, parameters, and response would depend on Google's official implementation.
-        # Replace this with the correct API call if/when it exists.
-        image_generation_prompt = f"Generate a hyper-realistic YouTube thumbnail, 16:9 aspect ratio, based on this: {prompt_text}. The image should be high quality, photorealistic, vibrant, and eye-catching."
-        
-        # Example: response = model_instance.generate_image_content(prompt=image_generation_prompt, output_mime_type="image/png")
-        # if response.image_bytes:
-        #     return response.image_bytes
+        st.info(f"Generating image with Imagen (Vertex AI) using prompt: '{prompt_text[:150]}...' (This may take a minute or two)")
+        enhanced_prompt = (
+            f"Create a hyper-realistic YouTube thumbnail with a 16:9 aspect ratio. "
+            f"The image should be extremely high quality, photorealistic, and follow YouTube thumbnail best practices "
+            f"with vibrant colors and clear focal points. Make it look professional and eye-catching. "
+            f"Content details: {prompt_text}"
+        )
 
-        st.error("Placeholder: Direct image generation with 'google-generativeai' SDK is not implemented in this example due to lack of a confirmed public API for it. This section needs the official method if/when Google releases it.")
-        return None  # Return None as the placeholder
-        
-    except AttributeError as ae:
-        st.error(f"SDK Error: The method for image generation might be incorrect or not available: {ae}")
-        return None
+        images_response = model_instance.generate_images(
+            prompt=enhanced_prompt,
+            number_of_images=1,
+            aspect_ratio="16:9",
+            # seed=12345 # Optional: for reproducibility
+        )
+        if images_response and images_response.images:
+            # Accessing image bytes, ensure this is compatible with your SDK version
+            img_bytes = images_response.images[0]._image_bytes 
+            return img_bytes
+        else:
+            st.error("Imagen (Vertex AI) did not return any images. The prompt might be too restrictive or an API issue occurred.")
+            return None
     except Exception as e:
-        st.error(f"Error during hypothetical Gemini image generation: {e}")
+        st.error(f"Error during Imagen (Vertex AI) generation: {e}")
         return None
 
 # --- Streamlit App UI & Logic ---
-st.title("🖼️ YouTube Thumbnail Analyzer & Creative Prompt Generator (Gemini Focus)")
-st.markdown("Upload images, get AI-powered analysis, and attempt to generate new thumbnails directly with Gemini API.")
-st.markdown("**Disclaimer:** Direct image *generation* with the `google-generativeai` SDK is a feature assumed for this example (May 2025). If not officially supported by Google with the model and SDK version you are using, image generation will fail or not work as expected.")
+st.title("🖼️ YouTube Thumbnail Analyzer & Generator")
+st.markdown("Upload images, get AI-powered analysis (Gemini), select prompt ideas, and generate new thumbnails (Vertex AI Imagen).")
 
+# Session State Initializations
 if 'clients_initialized' not in st.session_state: st.session_state.clients_initialized = False
 if 'uploaded_image_analyses' not in st.session_state: st.session_state.uploaded_image_analyses = [] 
 if 'all_selectable_prompts' not in st.session_state: st.session_state.all_selectable_prompts = [] 
@@ -176,9 +171,11 @@ if 'current_selected_labels' not in st.session_state: st.session_state.current_s
 if 'final_combined_prompt' not in st.session_state: st.session_state.final_combined_prompt = ""
 if 'generated_image_bytes' not in st.session_state: st.session_state.generated_image_bytes = None
 
+# Sidebar for Credentials
 with st.sidebar:
     st.header("🔑 Google Cloud Setup")
     gcp_project_id = st.text_input("GCP Project ID", st.secrets.get("GCP_PROJECT_ID", ""), help="Your Google Cloud Project ID.")
+    gcp_location = st.text_input("GCP Location for Vertex AI", st.secrets.get("GCP_LOCATION", "us-central1"), help="e.g., us-central1, asia-south1. Must be supported by Vertex AI.")
     
     creds_json_content = None
     creds_json_str_secret = st.secrets.get("GOOGLE_CREDENTIALS_JSON_STR")
@@ -186,7 +183,7 @@ with st.sidebar:
         creds_json_content = creds_json_str_secret
         st.caption("Using credentials from Streamlit Secrets.")
     else:
-        st.info("For deployed apps, use Streamlit Secrets. For local use, upload Service Account JSON.")
+        st.info("For deployed apps, use Streamlit Secrets. For local use, upload your Service Account JSON.")
         uploaded_sa_file = st.file_uploader("Upload Service Account JSON", type=['json'])
         if uploaded_sa_file:
             try:
@@ -194,25 +191,27 @@ with st.sidebar:
             except Exception as e:
                 st.error(f"Could not read uploaded JSON: {e}")
     
-    if st.button("Initialize Gemini Client", disabled=st.session_state.clients_initialized):
-        if gcp_project_id and creds_json_content:
-            with st.spinner("Initializing Gemini client..."):
-                initialize_gemini_client(creds_json_content)
+    if st.button("Initialize Google AI Clients", disabled=st.session_state.clients_initialized):
+        if gcp_project_id and gcp_location and creds_json_content:
+            with st.spinner("Initializing clients..."):
+                initialize_clients(gcp_project_id, gcp_location, creds_json_content)
         else:
-            st.warning("Please provide GCP Project ID and Service Account JSON.")
+            st.warning("Please provide Project ID, Location, and Service Account JSON content/upload.")
 
     if st.session_state.clients_initialized:
-        st.success("✅ Gemini Client Ready!")
+        st.success("✅ Clients Ready!")
     else:
-        st.info("ⓘ Please provide credentials and initialize client.")
+        st.info("ⓘ Please provide credentials and initialize clients to proceed.")
 
+# Main App Flow
 if not st.session_state.clients_initialized:
-    st.warning("🚦 Please initialize the Gemini Client using the sidebar.")
+    st.warning("🚦 Please initialize Google AI Clients using the sidebar to use the app.")
     st.stop()
 
-st.header("1. Upload Thumbnail Images")
+# 1. Multi-Image Upload
+st.header("1. Upload Thumbnail Images for Analysis")
 uploaded_files = st.file_uploader(
-    "Choose images to analyze (PNG, JPG, JPEG)",
+    "Choose images (PNG, JPG, JPEG)",
     type=["png", "jpg", "jpeg"],
     accept_multiple_files=True,
     key="thumbnail_uploader"
@@ -227,7 +226,7 @@ if uploaded_files:
             new_files_to_process.append(uploaded_file)
 
     if new_files_to_process:
-        if st.button(f"Analyze {len(new_files_to_process)} New Image(s) ✨", key="analyze_button"):
+        if st.button(f"Analyze {len(new_files_to_process)} New Image(s) with Gemini ✨", key="analyze_button"):
             with st.spinner("Analyzing images with Gemini... this may take a few moments per image."):
                 current_analyses = list(st.session_state.uploaded_image_analyses)
                 for uploaded_file in new_files_to_process:
@@ -251,6 +250,7 @@ if uploaded_files:
                     except Exception as e:
                         st.error(f"Error processing file {uploaded_file.name}: {e}")
                 st.session_state.uploaded_image_analyses = current_analyses
+                # Rebuild selectable prompts
                 st.session_state.all_selectable_prompts = []
                 for analysis_item in st.session_state.uploaded_image_analyses:
                     if analysis_item.get('analysis_data'):
@@ -264,12 +264,14 @@ if uploaded_files:
                                 )
             st.rerun()
 
+# Display Analyzed Images & Breakdowns
 if st.session_state.uploaded_image_analyses:
-    st.header("📊 Analyzed Images & Breakdowns")
+    st.header("📊 Analyzed Images & Prompt Ideas (from Gemini)")
     for item in st.session_state.uploaded_image_analyses:
         with st.expander(f"View Analysis for: {item['name']}", expanded=False):
             cols = st.columns([1, 2])
-            with cols[0]: st.image(item['image_obj'], caption=item['name'], use_column_width="auto")
+            with cols[0]:
+                st.image(item['image_obj'], caption=item['name'], use_column_width="auto")
             with cols[1]:
                 st.subheader(f"Breakdown for: {item['name']}")
                 if item.get('analysis_data'):
@@ -279,17 +281,22 @@ if st.session_state.uploaded_image_analyses:
                         prompt_sugg = data.get('prompt_suggestion')
                         if prompt_sugg and prompt_sugg.strip():
                              st.markdown(f"&nbsp;&nbsp;&nbsp;*Prompt Idea*: `{prompt_sugg}`")
-                else: st.write("No analysis data available.")
+                else:
+                    st.write("No analysis data available for this image.")
         st.divider()
 
+# 3. User Selection of Prompts & Image Generation
 if st.session_state.all_selectable_prompts:
-    st.header("📝 Select Prompt Components for New Thumbnail")
+    st.header("📝 Select Prompt Components & Generate New Thumbnail")
+    
     options = [item[1] for item in st.session_state.all_selectable_prompts]
     st.session_state.current_selected_labels = st.multiselect(
-        "Choose prompt segments:", options=options,
+        "Choose prompt segments from the analyses above:",
+        options=options,
         default=st.session_state.current_selected_labels, 
         key=f"prompt_multiselect_{len(st.session_state.all_selectable_prompts)}" 
     )
+    
     selected_prompt_texts_for_generation = []
     for label in st.session_state.current_selected_labels:
         for item in st.session_state.all_selectable_prompts:
@@ -299,34 +306,42 @@ if st.session_state.all_selectable_prompts:
     
     if selected_prompt_texts_for_generation:
         st.subheader("Selected Prompt Segments:")
-        for seg in selected_prompt_texts_for_generation: st.markdown(f"- `{seg}`")
+        for seg_idx, segment in enumerate(selected_prompt_texts_for_generation):
+            st.markdown(f"- `{segment}`")
+
         current_prompt_text = ", ".join(selected_prompt_texts_for_generation)
         st.session_state.final_combined_prompt = st.text_area(
-            "Combined Prompt (edit if needed):", value=current_prompt_text, 
-            height=150, key="final_prompt_edit_area"
+            "Combined Prompt for Imagen (edit if needed):", 
+            value=current_prompt_text, 
+            height=150, 
+            key="final_prompt_edit_area"
         )
 
-        if st.button("🚀 Generate Thumbnail with Gemini (Experimental)", type="primary", key="generate_gemini_image_button"):
+        if st.button("🚀 Generate Thumbnail with Vertex AI Imagen", type="primary", key="generate_imagen_button"):
             if not st.session_state.final_combined_prompt.strip():
-                st.error("The combined prompt is empty.")
+                st.error("The combined prompt is empty. Please select or write a prompt.")
             else:
-                with st.spinner("Attempting direct Gemini image generation... (Experimental Feature)"):
-                    generated_bytes = generate_image_with_gemini(st.session_state.final_combined_prompt) 
+                with st.spinner("Generating your new thumbnail with Vertex AI Imagen... This can take up to a minute!"):
+                    generated_bytes = generate_image_with_imagen(st.session_state.final_combined_prompt)
                     if generated_bytes:
                         st.session_state.generated_image_bytes = generated_bytes
-                        st.success("Image data received from Gemini (Experimental)!")
+                        st.success("Thumbnail Generated by Vertex AI Imagen!")
                     else:
-                        st.session_state.generated_image_bytes = None
-                        st.error("Gemini image generation did not return image data or failed. This is an experimental feature based on assumed SDK capabilities.")
+                        st.session_state.generated_image_bytes = None 
+                        st.error("Vertex AI Imagen thumbnail generation failed. Check logs or try a different prompt.")
                 st.rerun()
 
+# Display Generated Image
 if st.session_state.generated_image_bytes:
-    st.header("🎉 Your Generated Thumbnail (via Gemini Experimental) 🎉")
-    st.image(st.session_state.generated_image_bytes, caption="Generated by Gemini API (Experimental)", use_column_width="auto")
+    st.header("🎉 Your Generated Thumbnail (via Vertex AI Imagen) 🎉")
+    st.image(st.session_state.generated_image_bytes, caption="Generated by Vertex AI Imagen", use_column_width="auto")
     st.download_button(
-        label="Download Thumbnail", data=st.session_state.generated_image_bytes,
-        file_name="gemini_generated_thumbnail.png", mime="image/png", key="download_gemini_button"
+        label="Download Thumbnail",
+        data=st.session_state.generated_image_bytes,
+        file_name="imagen_generated_thumbnail.png",
+        mime="image/png",
+        key="download_imagen_button"
     )
 
 st.markdown("---")
-st.caption("Built with Streamlit and Google Generative AI. Image generation with Gemini direct API is experimental and based on assumed capabilities.")
+st.caption("Built with Streamlit, Google Gemini API (for analysis), and Vertex AI Imagen (for generation).")
